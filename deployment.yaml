@@ -1,0 +1,38 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: grafana-llm-nlp
+  namespace: mcp
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: grafana-llm-nlp
+  template:
+    metadata:
+      labels:
+        app: grafana-llm-nlp
+    spec:
+      containers:
+      - name: grafana-llm-nlp
+        image: python:3.10
+        command: ["/bin/sh", "-c"]
+        args:
+          - pip install --no-cache-dir fastapi uvicorn jinja2 requests python-multipart openai &&
+            mkdir -p /app/templates &&
+            cp /config/index.html /app/templates/index.html &&
+            cp /config/main.py /app/main.py &&
+            uvicorn main:app --host 0.0.0.0 --port 80 --reload
+        ports:
+        - containerPort: 80
+        env:
+        - name: OPENROUTER_API_KEY
+          value: "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"
+        volumeMounts:
+        - name: app-code
+          mountPath: /config
+        workingDir: /app
+      volumes:
+      - name: app-code
+        configMap:
+          name: grafana-llm-nlp-config

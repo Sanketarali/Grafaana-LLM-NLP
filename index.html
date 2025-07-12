@@ -1,0 +1,96 @@
+import os
+import requests
+from fastapi import FastAPI, Request, Form
+from fastapi.responses import HTMLResponse
+from jinja2 import Environment, FileSystemLoader
+from openai import OpenAI
+
+app = FastAPI()
+
+env = Environment(loader=FileSystemLoader('/app/templates'))
+
+OPENROUTER_API_KEY = os.getenv("OPENROUTER_API_KEY")
+GRAFANA_API_KEY = "glsa_vGKPhVud2RUO35V5yX4VbI69Hs5DMShf_7402c00b"
+GRAFANA_URL = "https://observ-stg.cloud-ng.net"
+
+client = OpenAI(
+    base_url="https://openrouter.ai/api/v1",
+    api_key=OPENROUTER_API_KEY,
+)
+
+chat_history = []
+
+@app.get("/", response_class=HTMLResponse)
+async def get_home():
+    global chat_history
+    chat_history = []  # Clear chat history on each fresh GET
+    template = env.get_template("index.html")
+    return template.render(chat_history=chat_history)
+
+@app.post("/", response_class=HTMLResponse)
+async def post_prompt(request: Request, prompt: str = Form(...)):
+    global chat_history
+
+    try:
+        response = client.chat.completions.create(
+            model="mistralai/mistral-7b-instruct",
+            messages=[
+                {"role": "system", "content": "You are an intelligent assistant. If the user's question is general knowledge, answer it directly. If it's about Grafana dashboards or metrics, respond accordingly."},
+                {"role": "user", "content": prompt}
+            ]
+        )
+
+        message = response.choices[0].message.content
+
+    except Exception as e:
+        message = f"Error: {str(e)}"
+
+    chat_history.append({"prompt": prompt, "response": message})
+
+    template = env.get_template("index.html")
+    return template.render(chat_history=chat_history)
+
+eksstg@bastion:~/grafana-mcp-llm/app$ cd templates/
+eksstg@bastion:~/grafana-mcp-llm/app/templates$ cat index.html
+<!DOCTYPE html>
+<html>
+<head>
+    <title>Grafana LLM Chat</title>
+    <link rel="icon" href="https://openai.com/favicon.ico">
+    <style>
+        body { font-family: Arial, sans-serif; background: #f5f5f5; display: flex; flex-direction: column; align-items: center; margin: 0; }
+        .chat-container { width: 60%; max-width: 800px; background: white; margin-top: 50px; border-radius: 10px; box-shadow: 0 2px 10px rgba(0,0,0,0.1); padding: 20px; }
+        .message { margin-bottom: 20px; }
+        .user { text-align: right; }
+        .assistant { text-align: left; }
+        .bubble { display: inline-block; padding: 10px 15px; border-radius: 20px; max-width: 70%; }
+        .user .bubble { background: #4CAF50; color: white; }
+        .assistant .bubble { background: #e0e0e0; color: #333; }
+        form { display: flex; margin-top: 20px; }
+        input[type="text"] { flex: 1; padding: 10px; border: 1px solid #ccc; border-radius: 20px; outline: none; }
+        button { padding: 10px 20px; border: none; background: #4CAF50; color: white; border-radius: 20px; margin-left: 10px; cursor: pointer; }
+        button:hover { background: #45a049; }
+        pre { background: #f0f0f0; padding: 10px; border-radius: 8px; overflow-x: auto; }
+    </style>
+</head>
+<body>
+    <div class="chat-container">
+        <h2>Grafana LLM Chat</h2>
+        {% for chat in chat_history %}
+            <div class="message user">
+                <div class="bubble">{{ chat.prompt }}</div>
+            </div>
+            <div class="message assistant">
+                <div class="bubble">{{ chat.response }}</div>
+                {% if chat.grafana_result %}
+                    <pre>{{ chat.grafana_result | safe }}</pre>
+                {% endif %}
+            </div>
+        {% endfor %}
+        <form method="post">
+            <input type="text" name="prompt" placeholder="Type your prompt..." required>
+            <button type="submit">Send</button>
+        </form>
+    </div>
+</body>
+</html>

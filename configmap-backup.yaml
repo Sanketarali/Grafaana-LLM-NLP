@@ -1,0 +1,117 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: grafana-llm-nlp-config
+  namespace: mcp
+data:
+  main.py: |
+    import os
+    import requests
+    from fastapi import FastAPI, Request, Form
+    from fastapi.responses import HTMLResponse
+    from jinja2 import Environment, FileSystemLoader
+
+    app = FastAPI()
+    env = Environment(loader=FileSystemLoader("templates"))
+
+    # Environment variables
+    OPENROUTER_API_KEY = os.environ.get("OPENROUTER_API_KEY")
+    GRAFANA_API_KEY = os.environ.get("GRAFANA_API_KEY")
+    GRAFANA_URL = os.environ.get("GRAFANA_URL")
+
+    conversation_history = []
+
+    @app.get("/", response_class=HTMLResponse)
+    async def get_prompt():
+        template = env.get_template("index.html")
+        return template.render(messages=conversation_history)
+
+    @app.post("/", response_class=HTMLResponse)
+    async def post_prompt(request: Request, prompt: str = Form(...)):
+        global conversation_history
+
+        headers = {
+            "Authorization": f"Bearer {OPENROUTER_API_KEY}",
+            "Content-Type": "application/json"
+        }
+
+        conversation_history.append({"role": "user", "content": prompt})
+
+        system_message = {
+            "role": "system",
+            "content": "You are an assistant that answers general questions and generates Grafana API calls if needed. Respond in structured JSON with llm_answer and optional grafana_api object."
+        }
+
+        payload = {
+            "model": "openai/gpt-4o",
+            "messages": conversation_history + [system_message],
+            "max_tokens": 1000
+        }
+
+        llm_response = requests.post(
+            "https://openrouter.ai/api/v1/chat/completions",
+            headers=headers,
+            json=payload
+        )
+
+        llm_json = llm_response.json()
+
+        if "error" in llm_json:
+            error_message = llm_json["error"].get("message", "Unknown error.")
+            conversation_history.append({"role": "assistant", "content": f"Error: {error_message}"})
+            template = env.get_template("index.html")
+            return template.render(messages=conversation_history, grafana_result=None)
+
+        try:
+            assistant_reply = llm_json["choices"][0]["message"]["content"]
+            if assistant_reply.strip().startswith("```json"):
+                import json
+                cleaned = assistant_reply.strip().removeprefix("```json").removesuffix("```").strip()
+                parsed = json.loads(cleaned)
+                display_text = parsed.get("llm_answer", cleaned)
+            else:
+                display_text = assistant_reply
+
+            conversation_history.append({"role": "assistant", "content": display_text})
+        except Exception as e:
+            conversation_history.append({"role": "assistant", "content": f"Error parsing LLM response: {e}"})
+
+        template = env.get_template("index.html")
+        return template.render(messages=conversation_history, grafana_result=None)
+
+  index.html: |
+    <!DOCTYPE html>
+    <html>
+    <head>
+        <title>Grafana LLM Chat</title>
+        <link rel="icon" href="https://openai.com/favicon.ico">
+        <style>
+            body { font-family: Arial, sans-serif; background: #f5f5f5; margin: 0; display: flex; justify-content: center; align-items: center; height: 100vh; }
+            .container { width: 80%; max-width: 800px; background: white; border-radius: 10px; padding: 20px; box-shadow: 0 2px 10px rgba(0,0,0,0.1); }
+            .message { margin-bottom: 15px; }
+            .user { text-align: right; }
+            .assistant { text-align: left; }
+            .bubble { display: inline-block; padding: 10px 15px; border-radius: 20px; max-width: 70%; }
+            .user .bubble { background: #4CAF50; color: white; }
+            .assistant .bubble { background: #e0e0e0; color: #333; }
+            form { display: flex; margin-top: 20px; }
+            input[type="text"] { flex: 1; padding: 10px; border: 1px solid #ccc; border-radius: 20px; outline: none; }
+            button { padding: 10px 20px; border: none; background: #4CAF50; color: white; border-radius: 20px; margin-left: 10px; cursor: pointer; }
+            button:hover { background: #45a049; }
+        </style>
+    </head>
+    <body>
+        <div class="container">
+            <h2>Grafana LLM Chat</h2>
+            {% for msg in messages %}
+                <div class="message {{ msg.role }}">
+                    <div class="bubble">{{ msg.content }}</div>
+                </div>
+            {% endfor %}
+            <form method="post">
+                <input type="text" name="prompt" placeholder="Type your prompt..." required>
+                <button type="submit">Send</button>
+            </form>
+        </div>
+    </body>
+    </html>

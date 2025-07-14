@@ -1,0 +1,238 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: grafana-llm-nlp-config
+  namespace: mcp
+data:
+  main.py: |
+    import os
+    import requests
+    import json
+    from fastapi import FastAPI, Request, Form
+    from fastapi.responses import HTMLResponse
+    from jinja2 import Environment, FileSystemLoader
+
+    app = FastAPI()
+    env = Environment(loader=FileSystemLoader("templates"))
+
+    OPENROUTER_API_KEY = os.environ.get("OPENROUTER_API_KEY")
+    GRAFANA_API_KEY = os.environ.get("GRAFANA_API_KEY")
+    GRAFANA_URL = os.environ.get("GRAFANA_URL")
+
+    conversation_history = []
+
+    @app.get("/", response_class=HTMLResponse)
+    async def get_prompt():
+        template = env.get_template("index.html")
+        return template.render(messages=conversation_history)
+
+    @app.post("/", response_class=HTMLResponse)
+    async def post_prompt(request: Request, prompt: str = Form(...)):
+        global conversation_history
+
+        headers = {
+            "Authorization": f"Bearer {OPENROUTER_API_KEY}",
+            "Content-Type": "application/json"
+        }
+
+        conversation_history.append({"role": "user", "content": prompt})
+
+        system_message = {
+            "role": "system",
+            "content": (
+                "You are an AI assistant integrated with Grafana MCP server. "
+                "Translate user prompts into valid Grafana API calls. Always respond ONLY in strict JSON format with: "
+                "- 'llm_answer': a clean human-readable summary of results or actions. "
+                "- 'grafana_api': object with 'method', 'endpoint', and optional 'body' for POST/PUT requests. "
+                "Example for GET: {\"llm_answer\": \"Here is the list of users...\", \"grafana_api\": {\"method\": \"GET\", \"endpoint\": \"/api/users\"}} "
+                "Example for POST: {\"llm_answer\": \"User created successfully.\", \"grafana_api\": {\"method\": \"POST\", \"endpoint\": \"/api/admin/users\", \"body\": {\"name\": \"John\", \"email\": \"john@example.com\"}}} "
+                "When listing data, format llm_answer as plain text summary, not as a table or code block. "
+                "If the operation requires a body (create/update), include a valid minimal JSON body example. "
+                "Do not include markdown or code block syntax."
+            )
+        }
+
+        payload = {
+            "model": "openai/gpt-4o",
+            "messages": [system_message] + conversation_history,
+            "max_tokens": 1000
+        }
+
+        llm_response = requests.post(
+            "https://openrouter.ai/api/v1/chat/completions",
+            headers=headers,
+            json=payload
+        )
+
+        llm_json = llm_response.json()
+
+        if "error" in llm_json:
+            error_message = llm_json["error"].get("message", "Unknown error.")
+            conversation_history.append({"role": "assistant", "content": f"Error from LLM: {error_message}"})
+            template = env.get_template("index.html")
+            return template.render(messages=conversation_history)
+
+        try:
+            assistant_reply = llm_json["choices"][0]["message"]["content"]
+
+            parsed = None
+            display_text = assistant_reply
+
+            cleaned = None
+            if assistant_reply.strip().startswith("```json"):
+                cleaned = assistant_reply.strip().removeprefix("```json").removesuffix("```").strip()
+            elif assistant_reply.strip().startswith("{"):
+                cleaned = assistant_reply.strip()
+
+            if cleaned:
+                try:
+                    parsed = json.loads(cleaned)
+                except json.JSONDecodeError as e:
+                    parsed = None
+                    display_text += f"<br>Error decoding JSON: {e}"
+
+            if parsed:
+                display_text = parsed.get("llm_answer", "No 'llm_answer' found in response.")
+                grafana_api = parsed.get("grafana_api", {})
+
+                if grafana_api:
+                    method = grafana_api.get("method", "GET")
+                    endpoint = grafana_api.get("endpoint", "")
+                    body = grafana_api.get("body", None)
+
+                    if endpoint and GRAFANA_URL and GRAFANA_API_KEY:
+                        grafana_headers = {
+                            "Authorization": f"Bearer {GRAFANA_API_KEY}",
+                            "Content-Type": "application/json"
+                        }
+                        try:
+                            r = requests.request(
+                                method,
+                                f"{GRAFANA_URL}{endpoint}",
+                                headers=grafana_headers,
+                                json=body if body else None,
+                                verify=False
+                            )
+                            r.raise_for_status()
+                            grafana_result = r.json()
+
+                            # Render result as formatted JSON text
+                            display_text += f"<br><pre>{json.dumps(grafana_result, indent=2)}</pre>"
+
+                        except requests.exceptions.RequestException as req_e:
+                            display_text += f"<br>Error executing Grafana API call: {req_e}"
+                    else:
+                        display_text += "<br>Error: Missing Grafana URL, API Key, or endpoint."
+
+            conversation_history.append({"role": "assistant", "content": display_text})
+
+        except Exception as e:
+            conversation_history.append({"role": "assistant", "content": f"Error processing LLM response: {e}"})
+
+        template = env.get_template("index.html")
+        return template.render(messages=conversation_history)
+
+  index.html: |
+    <!DOCTYPE html>
+    <html>
+    <head>
+        <title>Grafana MCP LLM Chat</title>
+        <link rel="icon" href="https://openai.com/favicon.ico">
+        <style>
+            body {
+                font-family: Arial, sans-serif;
+                background: #f5f5f5;
+                margin: 0;
+                display: flex;
+                justify-content: center;
+                align-items: flex-start;
+                height: 100vh;
+                width: 100vw;
+                overflow: hidden;
+            }
+            .container {
+                width: 100%;
+                max-width: 1200px;
+                height: 100vh;
+                background: white;
+                border-radius: 0;
+                padding: 20px;
+                box-shadow: none;
+                overflow-y: auto;
+                padding-bottom: 70px;
+            }
+            .message {
+                margin-bottom: 15px;
+            }
+            .user {
+                text-align: right;
+            }
+            .assistant {
+                text-align: left;
+            }
+            .bubble {
+                display: inline-block;
+                padding: 10px 15px;
+                border-radius: 20px;
+                max-width: 70%;
+                word-wrap: break-word;
+            }
+            .user .bubble {
+                background: #4CAF50;
+                color: white;
+            }
+            .assistant .bubble {
+                background: #e0e0e0;
+                color: #333;
+            }
+            form {
+                position: fixed;
+                bottom: 0;
+                left: 0;
+                right: 0;
+                background: white;
+                padding: 10px 20px;
+                display: flex;
+            }
+            input[type="text"] {
+                flex: 1;
+                padding: 10px;
+                border: 1px solid #ccc;
+                border-radius: 20px;
+                outline: none;
+            }
+            button {
+                padding: 10px 20px;
+                border: none;
+                background: #4CAF50;
+                color: white;
+                border-radius: 20px;
+                margin-left: 10px;
+                cursor: pointer;
+            }
+            button:hover {
+                background: #45a049;
+            }
+        </style>
+    </head>
+    <body>
+        <div class="container" id="chat-container">
+            <h2>Grafana MCP LLM Chat</h2>
+            {% for msg in messages %}
+                <div class="message {{ msg.role }}">
+                    <div class="bubble">{{ msg.content|safe }}</div>
+                </div>
+            {% endfor %}
+        </div>
+        <form method="post">
+            <input type="text" name="prompt" placeholder="Type your prompt..." required>
+            <button type="submit">Send</button>
+        </form>
+        <script>
+            window.onload = function() {
+                var chatContainer = document.getElementById("chat-container");
+                chatContainer.scrollTop = chatContainer.scrollHeight;
+            }
+        </script>
+    </body>
+    </html>
